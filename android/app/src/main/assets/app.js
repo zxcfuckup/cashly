@@ -6,7 +6,7 @@ const esc = x => String(x ?? "").replace(/[&<>\"]/g, m => ({"&":"&amp;","<":"&lt
 
 const defaults = () => ({
   setup: false,
-  start: { amount: 0, alloc: {} },
+  start: { amount: 0, alloc: {}, preAllocated: 0, preAllocatedPlanId: null },
   plans: [
     { id: 1, name: "Инвестиции", percent: 50, icon: "↗" },
     { id: 2, name: "Вклады", percent: 20, icon: "▣" },
@@ -22,6 +22,8 @@ const defaults = () => ({
 let s = JSON.parse(localStorage.getItem(K) || "null") || defaults();
 s.start ||= { amount: 0, alloc: {} };
 s.start.alloc ||= {};
+s.start.preAllocated = Number(s.start.preAllocated || 0);
+s.start.preAllocatedPlanId ??= null;
 s.plans ||= [];
 s.income ||= [];
 s.goals ||= [];
@@ -203,18 +205,55 @@ function finishStart(n) {
   const planId=$("#startAllocatedPlan").value;
   if(!Number.isFinite(allocated)||allocated<0||allocated>n) return toast("Проверь сумму");
   const result=calcStartAlloc(n,allocated,planId);
-  s.start={amount:n,alloc:result.alloc}; s.setup=true; save(); closeModal(); render(); toast("Cashly настроен");
+  s.start={amount:n,alloc:result.alloc,preAllocated:allocated,preAllocatedPlanId:planId};
+  s.setup=true; save(); closeModal(); render(); toast("Cashly настроен");
+}
+function inferStartMeta() {
+  if (!s.setup || !s.start.amount) return null;
+  if (s.start.preAllocatedPlanId != null) return { amount:Number(s.start.preAllocated||0), planId:String(s.start.preAllocatedPlanId) };
+  const n=Number(s.start.amount)||0;
+  if (!n || !s.plans.length) return { amount:0, planId:null };
+  const ids=s.plans.map(p=>String(p.id));
+  let best=null;
+  for (const candidate of s.plans) {
+    const pct=Number(candidate.percent||0)/100;
+    if (pct>=0.999999) continue;
+    const aCandidate=Number(s.start.alloc?.[candidate.id]||0);
+    const locked=(aCandidate - n*pct)/(1-pct);
+    if (locked < -0.01 || locked > n+0.01) continue;
+    const remainder=Math.max(0,n-locked);
+    let err=0;
+    for (const p of s.plans) {
+      const expected=remainder*Number(p.percent||0)/100 + (String(p.id)===String(candidate.id)?locked:0);
+      err += Math.abs(Number(s.start.alloc?.[p.id]||0)-expected);
+    }
+    if (!best || err<best.err) best={amount:Math.max(0,locked),planId:String(candidate.id),err};
+  }
+  if (!best || best.err>0.05) return { amount:0, planId:null };
+  return best;
+}
+function rebalanceStartAfterPlanChange() {
+  if (!s.setup || !s.start.amount) return;
+  const meta=inferStartMeta();
+  if (!meta) return;
+  s.start.preAllocated=meta.amount;
+  s.start.preAllocatedPlanId=meta.planId;
+  s.start.alloc=calcStartAlloc(Number(s.start.amount),meta.amount,meta.planId).alloc;
 }
 
 function editPlan(id) {
   const p = s.plans.find(x => x.id === id);
-  openModal("Изменить категорию", `<div class="field"><label>НАЗВАНИЕ</label><input id="pn" value="${esc(p.name)}"></div><div class="field"><label>ПРОЦЕНТ</label><input id="pp" type="number" inputmode="decimal" value="${p.percent}"></div><div class="field"><label>ЗНАЧОК</label><input id="pi" value="${esc(p.icon)}"></div><button class="primary" onclick="savePlan(${id})">Сохранить</button>`);
+  openModal("Изменить категорию", `<div class="field"><label>НАЗВАНИЕ</label><input id="pn" value="${esc(p.name)}"></div><div class="field"><label>ПРОЦЕНТ</label><input id="pp" type="number" inputmode="decimal" value="${p.percent}"></div><div class="preview">Изменение процента сразу пересчитает распределение стартового капитала. Уже распределённая ранее сумма останется в выбранной категории.</div><div class="field"><label>ЗНАЧОК</label><input id="pi" value="${esc(p.icon)}"></div><button class="primary" onclick="savePlan(${id})">Сохранить</button>`);
 }
 function savePlan(id) {
   const p = s.plans.find(x => x.id === id), n = $("#pn").value.trim(), v = +$("#pp").value;
   if (!n || v < 0 || v > 100) return toast("Проверь название и процент");
   if (total() - p.percent + v > 100) return toast("Общий процент не может быть больше 100%");
-  p.name=n; p.percent=v; p.icon=$("#pi").value || "•"; save(); closeModal(); render();
+  p.name=n; p.percent=v; p.icon=$("#pi").value || "•";
+  // Изменение процента сразу пересчитывает уже распределённый стартовый капитал.
+  // Ранее введённая сумма «Уже распределено» остаётся в своей категории.
+  rebalanceStartAfterPlanChange();
+  save(); closeModal(); render();
 }
 function delPlan(id) { if (s.plans.length < 2) return toast("Нужна хотя бы одна категория"); s.plans=s.plans.filter(p=>p.id!==id); save(); render(); }
 function createPlan() {
