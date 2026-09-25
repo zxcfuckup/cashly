@@ -1,11 +1,12 @@
 const K = "cashly_final_v1";
 const $ = s => document.querySelector(s);
-const money = n => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(Math.round(Number(n) || 0)) + " ₽";
+const money = n => new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(Math.round(Number(n) || 0)) + " ₽";
+const moneyPrecise = n => new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(n) || 0) + " ₽";
 const esc = x => String(x ?? "").replace(/[&<>\"]/g, m => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]));
 
 const defaults = () => ({
   setup: false,
-  start: { amount: 0, alloc: {} },
+  start: { amount: 0, alloc: {}, preAllocated: 0, preAllocatedPlanId: null },
   plans: [
     { id: 1, name: "Инвестиции", percent: 50, icon: "↗" },
     { id: 2, name: "Вклады", percent: 20, icon: "▣" },
@@ -15,26 +16,62 @@ const defaults = () => ({
   goals: [],
   income: [],
   theme: "purple",
-  goalTopups: []
+  goalTopups: [],
+  balanceAdjustments: [],
+  expenses: []
 });
 
 let s = JSON.parse(localStorage.getItem(K) || "null") || defaults();
+// Флаг завершения первоначальной настройки. После завершения стартовое окно
+// больше не показывается при обычном запуске приложения.
+if (typeof s.setupCompleted !== "boolean") {
+  const hasExistingData = Boolean(
+    s.setup === true ||
+    Number(s.start?.amount || 0) > 0 ||
+    (Array.isArray(s.income) && s.income.length > 0) ||
+    (Array.isArray(s.expenses) && s.expenses.length > 0) ||
+    (Array.isArray(s.balanceAdjustments) && s.balanceAdjustments.length > 0) ||
+    (Array.isArray(s.goals) && s.goals.length > 0)
+  );
+  s.setupCompleted = hasExistingData;
+  if (hasExistingData) save();
+}
 s.start ||= { amount: 0, alloc: {} };
 s.start.alloc ||= {};
+s.start.preAllocated = Number(s.start.preAllocated || 0);
+s.start.preAllocatedPlanId ??= null;
 s.plans ||= [];
 s.income ||= [];
 s.goals ||= [];
 s.goalTopups ||= [];
+s.balanceAdjustments ||= [];
+s.expenses ||= [];
 s.theme ||= "purple";
 s.income.forEach(x => { x.alloc ||= {}; x.goals ||= {}; });
 
 function save() { localStorage.setItem(K, JSON.stringify(s)); }
 function total() { return s.plans.reduce((a, p) => a + Number(p.percent || 0), 0); }
 function incomeTotal() { return s.income.reduce((a, x) => a + Number(x.amount || 0), 0); }
-function capitalTotal() { return Number(s.start.amount || 0) + incomeTotal(); }
+function capitalTotal() {
+  // Общий капитал — это сумма фактических текущих балансов всех категорий.
+  return s.plans.reduce((sum, p) => sum + currentBalance(p.id), 0);
+}
 function goalTotal() { return s.goals.reduce((a, g) => a + Number(g.saved || 0), 0); }
 function currentAllocated(id) {
-  return (s.start.alloc?.[id] || 0) + s.income.reduce((a, x) => a + (x.alloc?.[id] || 0), 0);
+  return (s.start.alloc?.[id] || 0) + s.income.reduce((a, x) => a + Number(x.alloc?.[id] || 0), 0);
+}
+function balanceAdjustmentTotal(id) {
+  return s.balanceAdjustments.reduce((a, x) => a + (String(x.planId) === String(id) ? Number(x.amount || 0) : 0), 0);
+}
+function expenseTotal(id) {
+  return s.expenses.reduce((a, x) => a + (String(x.planId) === String(id) ? Number(x.amount || 0) : 0), 0);
+}
+function currentBalance(id) {
+  return currentAllocated(id) + balanceAdjustmentTotal(id) - expenseTotal(id);
+}
+function planBalanceLabel(id) {
+  const value = currentBalance(id);
+  return money(value);
 }
 function currentGoalSaved(id) { return Number(s.goals.find(g => g.id === id)?.saved || 0); }
 function applyTheme() {
@@ -62,9 +99,9 @@ function render() {
 
   $("#plans").innerHTML = s.plans.map(p => `
     <div class="plan">
-      <div class="row"><div class="icon">${esc(p.icon)}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="muted">${p.percent}% от каждого нового дохода</div></div><b>${money(currentAllocated(p.id))}</b></div>
+      <div class="row"><div class="icon">${esc(p.icon)}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="muted">${p.percent}% от каждого нового дохода</div></div><b>${planBalanceLabel(p.id)}</b></div>
       <div class="bar"><i style="width:${Math.min(p.percent,100)}%"></i></div>
-      <div class="actions"><button class="mini" onclick="editPlan(${p.id})">Изменить</button><button class="mini" onclick="delPlan(${p.id})">Удалить</button></div>
+      <div class="actions"><button class="mini" onclick="editPlan(${p.id})">Изменить</button><button class="mini" onclick="editBalance(${p.id})">Баланс</button><button class="mini expense-btn" onclick="addExpense(${p.id})">Расход</button><button class="mini" onclick="delPlan(${p.id})">Удалить</button></div>
     </div>`).join("");
 
   $("#goals").innerHTML = s.goals.length ? s.goals.map(g => {
@@ -146,33 +183,164 @@ function addIncome() {
 }
 
 function setupStart() {
-  openModal("Добро пожаловать в Cashly", "");
-  $("#modalTitle").textContent = "Твои текущие накопления";
-  $("#modalBody").innerHTML = `<div class="field"><label>СКОЛЬКО УЖЕ ЕСТЬ</label><input id="startAmount" type="number" inputmode="decimal" placeholder="35000"></div><div class="preview">Это стартовый капитал. Он не считается зарплатой и настраивается только один раз при первом запуске.</div><button class="primary" onclick="setupAlloc()">Продолжить</button>`;
+  openModal("Твой стартовый капитал", `
+    <div class="field"><label>СТАРТОВЫЙ КАПИТАЛ, ₽</label><input id="startAmount" type="number" inputmode="decimal" min="0" step="0.01" value="5000" placeholder="5000"></div>
+    <div class="preview">Укажи общую сумму денег, с которой начинаешь пользоваться Cashly.</div>
+    <button class="primary" onclick="setupAlloc()">Продолжить</button>`);
 }
 function setupAlloc() {
-  const n = +$("#startAmount").value || 0;
-  openModal("Распредели накопления", "СТАРТОВЫЙ КАПИТАЛ");
-  $("#modalBody").innerHTML = `<div class="preview">Стартовый капитал: <b>${money(n)}</b></div>` + s.plans.map(p => `<div class="field"><label>${esc(p.name)}</label><input class="startInput" data-id="${p.id}" type="number" inputmode="decimal" placeholder="0"></div>`).join("") + `<button class="primary" onclick="finishStart(${n})">Завершить настройку</button>`;
+  const n = Number($("#startAmount").value);
+  if (!Number.isFinite(n) || n < 0) return toast("Введи корректную сумму");
+  openModal("Что уже есть и что распределить", "");
+  const options = s.plans.map((p,i)=>`<option value="${p.id}" ${i===0?"selected":""}>${esc(p.name)}</option>`).join("");
+  $("#modalBody").innerHTML = `
+    <div class="preview"><b>Важно:</b> сумма «Уже распределено» уже находится в выбранной категории и не распределяется повторно. Cashly возьмёт только остаток и распределит его по твоим процентам.</div>
+    <div class="field"><label>СТАРТОВЫЙ КАПИТАЛ, ₽</label><div class="preview"><b>${moneyPrecise(n)}</b></div></div>
+    <div class="field"><label>УЖЕ РАСПРЕДЕЛЕНО, ₽</label><input id="startAllocated" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0"></div>
+    <div class="field"><label>КУДА УЖЕ РАСПРЕДЕЛЕНО</label><select id="startAllocatedPlan">${options}</select></div>
+    <div id="startPreview" class="preview">Введи уже распределённую сумму.</div>
+    <button id="finishStartBtn" class="primary" onclick="finishStart(${JSON.stringify(n)})">Завершить настройку</button>`;
+  const inp=$("#startAllocated");
+  const select=$("#startAllocatedPlan");
+  inp.addEventListener("input",()=>updateStartPreview(n));
+  select.addEventListener("change",()=>updateStartPreview(n));
+  updateStartPreview(n);
+}
+function calcStartAlloc(n, allocated, allocatedPlanId) {
+  const remainder = Math.max(0,n-allocated);
+  const alloc = {};
+  const pct = total();
+  s.plans.forEach(p => {
+    const extra = remainder * Number(p.percent||0) / 100;
+    alloc[p.id] = extra + (String(p.id) === String(allocatedPlanId) ? allocated : 0);
+  });
+  return {alloc,remainder,unallocated:Math.max(0,remainder * (1-pct/100))};
+}
+function updateStartPreview(n) {
+  const box=$("#startPreview"); if(!box)return;
+  const allocated=Number($("#startAllocated").value)||0;
+  const planId=$("#startAllocatedPlan").value;
+  if(allocated<0 || allocated>n) {
+    box.innerHTML=`<span class="error">Уже распределённая сумма должна быть от 0 до ${moneyPrecise(n)}.</span>`;
+    return;
+  }
+  const result=calcStartAlloc(n,allocated,planId);
+  const selectedPlan=s.plans.find(p=>String(p.id)===String(planId));
+  box.innerHTML=`<div><b>${allocated>0 ? `Уже в «${esc(selectedPlan?.name||"категории")}` : "Уже распределено"}:</b> ${moneyPrecise(allocated)}</div>`+
+    `<div><b>Осталось распределить:</b> ${moneyPrecise(result.remainder)}</div>`+
+    `<div style="margin-top:8px"><b>После настройки получится:</b></div>`+
+    s.plans.map(p=>`${esc(p.name)} — <b>${moneyPrecise(result.alloc[p.id]||0)}</b>`).join("<br>")+
+    (result.unallocated>0.005 ? `<br><br>Останется свободно — <b>${moneyPrecise(result.unallocated)}</b>` : "");
+  const btn=$("#finishStartBtn");
+  if(btn) btn.textContent=`Распределить ${moneyPrecise(result.remainder)} и завершить`;
 }
 function finishStart(n) {
-  const alloc = {}; document.querySelectorAll(".startInput").forEach(x => alloc[x.dataset.id] = +x.value || 0);
-  const used = Object.values(alloc).reduce((a,b) => a + b, 0);
-  if (used > n) return toast("Распределено больше стартового капитала");
-  s.start = { amount: n, alloc }; s.setup = true; save(); closeModal(); render(); toast("Cashly настроен");
+  const allocated=Number($("#startAllocated").value)||0;
+  const planId=$("#startAllocatedPlan").value;
+  if(!Number.isFinite(allocated)||allocated<0||allocated>n) return toast("Проверь сумму");
+  const result=calcStartAlloc(n,allocated,planId);
+  s.start={amount:n,alloc:result.alloc,preAllocated:allocated,preAllocatedPlanId:planId};
+  s.setup=true;
+  s.setupCompleted=true;
+  save(); closeModal(); render(); toast("Cashly настроен");
+}
+function inferStartMeta() {
+  if (!s.setup || !s.start.amount) return null;
+  if (s.start.preAllocatedPlanId != null) return { amount:Number(s.start.preAllocated||0), planId:String(s.start.preAllocatedPlanId) };
+  const n=Number(s.start.amount)||0;
+  if (!n || !s.plans.length) return { amount:0, planId:null };
+  const ids=s.plans.map(p=>String(p.id));
+  let best=null;
+  for (const candidate of s.plans) {
+    const pct=Number(candidate.percent||0)/100;
+    if (pct>=0.999999) continue;
+    const aCandidate=Number(s.start.alloc?.[candidate.id]||0);
+    const locked=(aCandidate - n*pct)/(1-pct);
+    if (locked < -0.01 || locked > n+0.01) continue;
+    const remainder=Math.max(0,n-locked);
+    let err=0;
+    for (const p of s.plans) {
+      const expected=remainder*Number(p.percent||0)/100 + (String(p.id)===String(candidate.id)?locked:0);
+      err += Math.abs(Number(s.start.alloc?.[p.id]||0)-expected);
+    }
+    if (!best || err<best.err) best={amount:Math.max(0,locked),planId:String(candidate.id),err};
+  }
+  if (!best || best.err>0.05) return { amount:0, planId:null };
+  return best;
+}
+function rebalanceStartAfterPlanChange() {
+  if (!s.setup || !s.start.amount) return;
+  const meta=inferStartMeta();
+  if (!meta) return;
+  s.start.preAllocated=meta.amount;
+  s.start.preAllocatedPlanId=meta.planId;
+  s.start.alloc=calcStartAlloc(Number(s.start.amount),meta.amount,meta.planId).alloc;
 }
 
 function editPlan(id) {
   const p = s.plans.find(x => x.id === id);
-  openModal("Изменить категорию", `<div class="field"><label>НАЗВАНИЕ</label><input id="pn" value="${esc(p.name)}"></div><div class="field"><label>ПРОЦЕНТ</label><input id="pp" type="number" inputmode="decimal" value="${p.percent}"></div><div class="field"><label>ЗНАЧОК</label><input id="pi" value="${esc(p.icon)}"></div><button class="primary" onclick="savePlan(${id})">Сохранить</button>`);
+  openModal("Изменить категорию", `<div class="field"><label>НАЗВАНИЕ</label><input id="pn" value="${esc(p.name)}"></div><div class="field"><label>ПРОЦЕНТ</label><input id="pp" type="number" inputmode="decimal" value="${p.percent}"></div><div class="preview">Изменение процента сразу пересчитает распределение стартового капитала. Уже распределённая ранее сумма останется в выбранной категории.</div><div class="field"><label>ЗНАЧОК</label><input id="pi" value="${esc(p.icon)}"></div><button class="primary" onclick="savePlan(${id})">Сохранить</button>`);
 }
 function savePlan(id) {
   const p = s.plans.find(x => x.id === id), n = $("#pn").value.trim(), v = +$("#pp").value;
   if (!n || v < 0 || v > 100) return toast("Проверь название и процент");
   if (total() - p.percent + v > 100) return toast("Общий процент не может быть больше 100%");
-  p.name=n; p.percent=v; p.icon=$("#pi").value || "•"; save(); closeModal(); render();
+  p.name=n; p.percent=v; p.icon=$("#pi").value || "•";
+  // Изменение процента сразу пересчитывает уже распределённый стартовый капитал.
+  // Ранее введённая сумма «Уже распределено» остаётся в своей категории.
+  rebalanceStartAfterPlanChange();
+  save(); closeModal(); render();
 }
-function delPlan(id) { if (s.plans.length < 2) return toast("Нужна хотя бы одна категория"); s.plans=s.plans.filter(p=>p.id!==id); save(); render(); }
+function editBalance(id) {
+  const p = s.plans.find(x => x.id === id);
+  if (!p) return;
+  const current = currentBalance(id);
+  openModal("Изменить баланс", `
+    <div class="balance-modal-head"><div class="muted">Категория</div><b>${esc(p.name)}</b></div>
+    <div class="balance-current"><span>Сейчас</span><b>${money(current)}</b></div>
+    <div class="field"><label>ФАКТИЧЕСКАЯ СУММА, ₽</label><input id="balanceAmount" type="number" inputmode="decimal" min="0" step="0.01" value="${Number(current).toFixed(2)}"></div>
+    <div class="preview">Cashly сохранит разницу отдельной корректировкой. Старые доходы и их распределение не изменятся.</div>
+    <button class="primary" onclick="saveBalance(${id})">Сохранить баланс</button>`);
+}
+function saveBalance(id) {
+  const p = s.plans.find(x => x.id === id);
+  const actual = Number($("#balanceAmount")?.value);
+  if (!p || !Number.isFinite(actual) || actual < 0) return toast("Введи корректную сумму");
+  const before = currentBalance(id);
+  const delta = actual - before;
+  if (Math.abs(delta) < 0.005) { closeModal(); return; }
+  s.balanceAdjustments.unshift({ id: Date.now(), planId: id, amount: delta, date: new Date().toISOString() });
+  save(); closeModal(); render(); toast("Баланс обновлён");
+}
+function addExpense(id) {
+  const p = s.plans.find(x => String(x.id) === String(id));
+  if (!p) return;
+  const current = currentBalance(id);
+  openModal("Добавить расход", `
+    <div class="balance-modal-head"><div class="muted">Категория</div><b>${esc(p.name)}</b></div>
+    <div class="balance-current"><span>Доступный баланс</span><b>${money(current)}</b></div>
+    <div class="field"><label>СУММА РАСХОДА, ₽</label><input id="expenseAmount" type="number" inputmode="decimal" min="0.01" step="0.01" max="${Math.max(0,current)}" placeholder="500"></div>
+    <div class="field"><label>ОПИСАНИЕ (НЕОБЯЗАТЕЛЬНО)</label><input id="expenseDescription" type="text" maxlength="120" placeholder="Например, продукты"></div>
+    <div class="preview">Расход уменьшит фактический баланс этой категории и появится в истории.</div>
+    <button class="primary" onclick="saveExpense(${id})">Добавить расход</button>`);
+}
+function saveExpense(id) {
+  const p = s.plans.find(x => String(x.id) === String(id));
+  const amount = Number($("#expenseAmount")?.value);
+  const description = ($("#expenseDescription")?.value || "").trim();
+  if (!p || !Number.isFinite(amount) || amount <= 0) return toast("Введи корректную сумму");
+  const current = currentBalance(id);
+  if (amount > current + 0.001) return toast(`Недостаточно средств: ${money(current)}`);
+  s.expenses.unshift({
+    id: Date.now(),
+    planId: id,
+    amount,
+    description,
+    date: new Date().toISOString()
+  });
+  save(); closeModal(); render(); toast("Расход добавлен");
+}
+function delPlan(id) { if (s.plans.length < 2) return toast("Нужна хотя бы одна категория"); s.plans=s.plans.filter(p=>p.id!==id); s.balanceAdjustments=s.balanceAdjustments.filter(x=>String(x.planId)!==String(id)); save(); render(); }
 function createPlan() {
   const n=$("#pn").value.trim(), v=+$("#pp").value;
   if(!n || v<0 || total()+v>100) return toast("Проверь название и общий процент");
@@ -222,21 +390,37 @@ function showScreen(name){
   if(name==="history"){
     let rows=`<div class="card history-card"><div class="alloc"><span>Стартовый капитал</span><b>${money(s.start.amount)}</b></div>`;
     rows += s.income.length ? s.income.map(x=>`<div class="history-item"><div class="alloc"><span>Доход · ${new Date(x.date).toLocaleDateString("ru-RU")}</span><b>${money(x.amount)}</b></div><div class="history-details">${s.plans.map(p=>`<div><span>${esc(p.name)}</span><b>${money(x.alloc?.[p.id]||0)}</b></div>`).join("")}${Object.entries(x.goals||{}).map(([gid,a])=>{const g=s.goals.find(z=>String(z.id)===String(gid));return g?`<div><span>🎯 ${esc(g.name)}</span><b>${money(a)}</b></div>`:""}).join("")}<div><span>Не распределено</span><b>${money(unallocatedForIncome(x))}</b></div></div></div>`).join("") : `<p class="muted">Новых доходов пока нет.</p>`;
+    if(s.expenses?.length){ rows += `<div class="card history-card"><div class="name">Расходы</div>${s.expenses.map(t=>{const p=s.plans.find(z=>String(z.id)===String(t.planId));return p?`<div class="alloc expense-row"><span>− ${esc(p.name)} · ${new Date(t.date).toLocaleDateString("ru-RU")}${t.description?`<br><small>${esc(t.description)}</small>`:""}</span><b>−${money(t.amount)}</b></div>`:""}).join("")}</div>`; }
+    if(s.balanceAdjustments?.length){ rows += `<div class="card history-card"><div class="name">Корректировки баланса</div>${s.balanceAdjustments.map(t=>{const p=s.plans.find(z=>String(z.id)===String(t.planId));return p?`<div class="alloc"><span>↕ ${esc(p.name)} · ${new Date(t.date).toLocaleDateString("ru-RU")}</span><b>${t.amount>=0?"+":""}${money(t.amount)}</b></div>`:""}).join("")}</div>`; }
     if(s.goalTopups?.length){ rows += `<div class="card history-card"><div class="name">Пополнения целей</div>${s.goalTopups.map(t=>{const g=s.goals.find(z=>z.id===t.goalId);return g?`<div class="alloc"><span>🎯 ${esc(g.name)} · ${new Date(t.date).toLocaleDateString("ru-RU")}</span><b>${money(t.amount)}</b></div>`:""}).join("")}</div>`; }
     rows += `</div>`; $("#screenBody").innerHTML=rows;
   } else if(name==="analytics"){
     const inc=incomeTotal(), start=Number(s.start.amount||0);
-    $("#screenBody").innerHTML=`<div class="card"><div class="name">Общий капитал</div><h1>${money(start+inc)}</h1><div class="muted">Стартовый капитал: ${money(start)}</div><div class="muted">Новые доходы: ${money(inc)}</div><div class="muted">Всего поступило: ${money(start+inc)}</div><div class="muted">В цели направлено: ${money(goalTotal())}</div><div class="muted">Текущий план: ${total()}% распределения</div></div>`;
+    const adjustments=s.balanceAdjustments.reduce((a,x)=>a+Number(x.amount||0),0);
+    const actualPlans=s.plans.reduce((a,p)=>a+currentBalance(p.id),0);
+    $("#screenBody").innerHTML=`<div class="card"><div class="name">Общий капитал</div><h1>${money(actualPlans)}</h1><div class="muted">Стартовый капитал: ${money(start)}</div><div class="muted">Новые доходы: ${money(inc)}</div><div class="muted">Всего поступило: ${money(start+inc)}</div><div class="muted">Фактический баланс категорий: ${money(actualPlans)}</div><div class="muted">Корректировки балансов: ${money(adjustments)}</div><div class="muted">Расходы: ${money(s.expenses.reduce((a,x)=>a+Number(x.amount||0),0))}</div><div class="muted">В цели направлено: ${money(goalTotal())}</div><div class="muted">Текущий план: ${total()}% распределения</div></div>`;
   } else {
     $("#screenBody").innerHTML=`<div class="card" style="padding:18px"><div class="name">Тема интерфейса</div><div class="themegrid" style="margin-top:12px"><button onclick="setTheme('purple')">🟣 Violet</button><button onclick="setTheme('blue')">🔵 Ocean</button><button onclick="setTheme('green')">🟢 Emerald</button><button onclick="setTheme('pink')">🌸 Pink</button><button onclick="setTheme('light')">⚪ Light</button></div></div><div class="card danger-card"><div class="name">Сбросить Cashly</div><div class="muted">Удалит все категории, цели, доходы и стартовый капитал на этом устройстве.</div><button class="reset-btn" onclick="resetApp()">Сбросить всё</button></div>`;
   }
 }
 function setTheme(x){s.theme=x;save();applyTheme();showScreen("settings")}
 function resetApp(){
-  if(!confirm("Сбросить Cashly? Все данные приложения на этом устройстве будут удалены.")) return;
-  localStorage.removeItem(K); location.reload();
+  openModal("Сбросить всё?", `
+    <div class="preview">Все категории, цели, доходы, настройки и стартовый капитал будут удалены. Это действие нельзя отменить.</div>
+    <div class="actions">
+      <button class="mini" onclick="closeModal()">Отмена</button>
+      <button class="reset-btn" onclick="confirmResetApp()">Да, сбросить всё</button>
+    </div>`);
+}
+function confirmResetApp(){
+  localStorage.removeItem(K);
+  closeModal();
+  location.reload();
 }
 $("#back").onclick=()=>{$("#screen").classList.add("hidden");$("#app").classList.remove("hidden");document.querySelectorAll("nav button").forEach(b=>b.classList.remove("active"));document.querySelector('nav button[data-screen="home"]').classList.add("active")};
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{document.querySelectorAll("nav button").forEach(x=>x.classList.remove("active"));b.classList.add("active");showScreen(b.dataset.screen)});
 
-render(); if(!s.setup) setTimeout(setupStart,300);
+render();
+if(!s.setupCompleted){
+  setTimeout(setupStart,300);
+}
