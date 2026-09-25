@@ -16,7 +16,8 @@ const defaults = () => ({
   goals: [],
   income: [],
   theme: "purple",
-  goalTopups: []
+  goalTopups: [],
+  balanceAdjustments: []
 });
 
 let s = JSON.parse(localStorage.getItem(K) || "null") || defaults();
@@ -28,6 +29,7 @@ s.plans ||= [];
 s.income ||= [];
 s.goals ||= [];
 s.goalTopups ||= [];
+s.balanceAdjustments ||= [];
 s.theme ||= "purple";
 s.income.forEach(x => { x.alloc ||= {}; x.goals ||= {}; });
 
@@ -38,6 +40,16 @@ function capitalTotal() { return Number(s.start.amount || 0) + incomeTotal(); }
 function goalTotal() { return s.goals.reduce((a, g) => a + Number(g.saved || 0), 0); }
 function currentAllocated(id) {
   return (s.start.alloc?.[id] || 0) + s.income.reduce((a, x) => a + (x.alloc?.[id] || 0), 0);
+}
+function balanceAdjustmentTotal(id) {
+  return s.balanceAdjustments.reduce((a, x) => a + (String(x.planId) === String(id) ? Number(x.amount || 0) : 0), 0);
+}
+function currentBalance(id) {
+  return currentAllocated(id) + balanceAdjustmentTotal(id);
+}
+function planBalanceLabel(id) {
+  const value = currentBalance(id);
+  return money(value);
 }
 function currentGoalSaved(id) { return Number(s.goals.find(g => g.id === id)?.saved || 0); }
 function applyTheme() {
@@ -65,9 +77,9 @@ function render() {
 
   $("#plans").innerHTML = s.plans.map(p => `
     <div class="plan">
-      <div class="row"><div class="icon">${esc(p.icon)}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="muted">${p.percent}% от каждого нового дохода</div></div><b>${money(currentAllocated(p.id))}</b></div>
+      <div class="row"><div class="icon">${esc(p.icon)}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="muted">${p.percent}% от каждого нового дохода</div></div><b>${planBalanceLabel(p.id)}</b></div>
       <div class="bar"><i style="width:${Math.min(p.percent,100)}%"></i></div>
-      <div class="actions"><button class="mini" onclick="editPlan(${p.id})">Изменить</button><button class="mini" onclick="delPlan(${p.id})">Удалить</button></div>
+      <div class="actions"><button class="mini" onclick="editPlan(${p.id})">Изменить</button><button class="mini" onclick="editBalance(${p.id})">Баланс</button><button class="mini" onclick="delPlan(${p.id})">Удалить</button></div>
     </div>`).join("");
 
   $("#goals").innerHTML = s.goals.length ? s.goals.map(g => {
@@ -255,7 +267,28 @@ function savePlan(id) {
   rebalanceStartAfterPlanChange();
   save(); closeModal(); render();
 }
-function delPlan(id) { if (s.plans.length < 2) return toast("Нужна хотя бы одна категория"); s.plans=s.plans.filter(p=>p.id!==id); save(); render(); }
+function editBalance(id) {
+  const p = s.plans.find(x => x.id === id);
+  if (!p) return;
+  const current = currentBalance(id);
+  openModal("Изменить баланс", `
+    <div class="balance-modal-head"><div class="muted">Категория</div><b>${esc(p.name)}</b></div>
+    <div class="balance-current"><span>Сейчас</span><b>${money(current)}</b></div>
+    <div class="field"><label>ФАКТИЧЕСКАЯ СУММА, ₽</label><input id="balanceAmount" type="number" inputmode="decimal" min="0" step="0.01" value="${Number(current).toFixed(2)}"></div>
+    <div class="preview">Cashly сохранит разницу отдельной корректировкой. Старые доходы и их распределение не изменятся.</div>
+    <button class="primary" onclick="saveBalance(${id})">Сохранить баланс</button>`);
+}
+function saveBalance(id) {
+  const p = s.plans.find(x => x.id === id);
+  const actual = Number($("#balanceAmount")?.value);
+  if (!p || !Number.isFinite(actual) || actual < 0) return toast("Введи корректную сумму");
+  const before = currentBalance(id);
+  const delta = actual - before;
+  if (Math.abs(delta) < 0.005) { closeModal(); return; }
+  s.balanceAdjustments.unshift({ id: Date.now(), planId: id, amount: delta, date: new Date().toISOString() });
+  save(); closeModal(); render(); toast("Баланс обновлён");
+}
+function delPlan(id) { if (s.plans.length < 2) return toast("Нужна хотя бы одна категория"); s.plans=s.plans.filter(p=>p.id!==id); s.balanceAdjustments=s.balanceAdjustments.filter(x=>String(x.planId)!==String(id)); save(); render(); }
 function createPlan() {
   const n=$("#pn").value.trim(), v=+$("#pp").value;
   if(!n || v<0 || total()+v>100) return toast("Проверь название и общий процент");
@@ -305,11 +338,14 @@ function showScreen(name){
   if(name==="history"){
     let rows=`<div class="card history-card"><div class="alloc"><span>Стартовый капитал</span><b>${money(s.start.amount)}</b></div>`;
     rows += s.income.length ? s.income.map(x=>`<div class="history-item"><div class="alloc"><span>Доход · ${new Date(x.date).toLocaleDateString("ru-RU")}</span><b>${money(x.amount)}</b></div><div class="history-details">${s.plans.map(p=>`<div><span>${esc(p.name)}</span><b>${money(x.alloc?.[p.id]||0)}</b></div>`).join("")}${Object.entries(x.goals||{}).map(([gid,a])=>{const g=s.goals.find(z=>String(z.id)===String(gid));return g?`<div><span>🎯 ${esc(g.name)}</span><b>${money(a)}</b></div>`:""}).join("")}<div><span>Не распределено</span><b>${money(unallocatedForIncome(x))}</b></div></div></div>`).join("") : `<p class="muted">Новых доходов пока нет.</p>`;
+    if(s.balanceAdjustments?.length){ rows += `<div class="card history-card"><div class="name">Корректировки баланса</div>${s.balanceAdjustments.map(t=>{const p=s.plans.find(z=>String(z.id)===String(t.planId));return p?`<div class="alloc"><span>↕ ${esc(p.name)} · ${new Date(t.date).toLocaleDateString("ru-RU")}</span><b>${t.amount>=0?"+":""}${money(t.amount)}</b></div>`:""}).join("")}</div>`; }
     if(s.goalTopups?.length){ rows += `<div class="card history-card"><div class="name">Пополнения целей</div>${s.goalTopups.map(t=>{const g=s.goals.find(z=>z.id===t.goalId);return g?`<div class="alloc"><span>🎯 ${esc(g.name)} · ${new Date(t.date).toLocaleDateString("ru-RU")}</span><b>${money(t.amount)}</b></div>`:""}).join("")}</div>`; }
     rows += `</div>`; $("#screenBody").innerHTML=rows;
   } else if(name==="analytics"){
     const inc=incomeTotal(), start=Number(s.start.amount||0);
-    $("#screenBody").innerHTML=`<div class="card"><div class="name">Общий капитал</div><h1>${money(start+inc)}</h1><div class="muted">Стартовый капитал: ${money(start)}</div><div class="muted">Новые доходы: ${money(inc)}</div><div class="muted">Всего поступило: ${money(start+inc)}</div><div class="muted">В цели направлено: ${money(goalTotal())}</div><div class="muted">Текущий план: ${total()}% распределения</div></div>`;
+    const adjustments=s.balanceAdjustments.reduce((a,x)=>a+Number(x.amount||0),0);
+    const actualPlans=s.plans.reduce((a,p)=>a+currentBalance(p.id),0);
+    $("#screenBody").innerHTML=`<div class="card"><div class="name">Общий капитал</div><h1>${money(start+inc)}</h1><div class="muted">Стартовый капитал: ${money(start)}</div><div class="muted">Новые доходы: ${money(inc)}</div><div class="muted">Всего поступило: ${money(start+inc)}</div><div class="muted">Фактический баланс категорий: ${money(actualPlans)}</div><div class="muted">Корректировки балансов: ${money(adjustments)}</div><div class="muted">В цели направлено: ${money(goalTotal())}</div><div class="muted">Текущий план: ${total()}% распределения</div></div>`;
   } else {
     $("#screenBody").innerHTML=`<div class="card" style="padding:18px"><div class="name">Тема интерфейса</div><div class="themegrid" style="margin-top:12px"><button onclick="setTheme('purple')">🟣 Violet</button><button onclick="setTheme('blue')">🔵 Ocean</button><button onclick="setTheme('green')">🟢 Emerald</button><button onclick="setTheme('pink')">🌸 Pink</button><button onclick="setTheme('light')">⚪ Light</button></div></div><div class="card danger-card"><div class="name">Сбросить Cashly</div><div class="muted">Удалит все категории, цели, доходы и стартовый капитал на этом устройстве.</div><button class="reset-btn" onclick="resetApp()">Сбросить всё</button></div>`;
   }

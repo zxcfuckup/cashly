@@ -56,3 +56,5 @@ nav button{flex:1;border:0;background:none;color:#686875;font-size:22px;display:
 body.light .themegrid button{color:#20202a;background:#f3f3f8;border-color:#d7d7e1;}
 body.light .themegrid button:focus,body.light .themegrid button:active{color:#17171d;}
 body.light .preview{background:#f0f0f6;color:#555560;}
+
+.balance-modal-head{display:flex;justify-content:space-between;align-items:center;padding:4px 0 12px}.balance-current{display:flex;justify-content:space-between;align-items:center;padding:12px 13px;margin-bottom:12px;border:1px solid #252531;border-radius:14px;background:#171720}.balance-current b{font-size:18px}.actions{display:flex;justify-content:flex-end;align-items:center;gap:8px;flex-wrap:wrap}.actions .mini{padding:9px 10px;min-height:36px;font-size:11px}
